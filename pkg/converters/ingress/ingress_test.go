@@ -82,6 +82,89 @@ func TestSyncDefaultSvcNotFound(t *testing.T) {
 ERROR error reading default service: service not found: 'system/default'`)
 }
 
+func TestSyncSvcPortNotFound(t *testing.T) {
+	c := setup(t)
+	defer c.teardown()
+
+	c.createSvc1Auto()
+	c.Sync(c.createIng1("default/echo", "echo.example.com", "/", "echo:non"))
+
+	c.compareConfigFront(`
+- hostname: echo.example.com
+  paths:
+  - path: /
+    backend: default_echo_non
+`)
+
+	c.compareConfigBack(`
+- id: default_echo_non
+- id: _default_backend
+  endpoints:
+  - ip: 172.17.0.99
+    port: 8080
+`)
+
+	c.compareLogging(`
+ERROR error adding endpoints of service 'default/echo': port not found: 'non'
+`)
+}
+
+func TestSyncSvcNamedPort(t *testing.T) {
+	c := setup(t)
+	defer c.teardown()
+
+	c.createSvc1("default/echo", "httpsvc:1001:8080", "172.17.1.101")
+	c.Sync(
+		c.createIng1("default/echo1", "echo1.example.com", "/", "echo:httpsvc"),
+		c.createIng1("default/echo2", "echo2.example.com", "/", "echo:1001"),
+		c.createIng1("default/echo3", "echo3.example.com", "/", "echo:8080"),
+		c.createIng1("default/echo4", "echo4.example.com", "/", "echo:9000"),
+	)
+
+	c.compareConfigFront(`
+- hostname: echo1.example.com
+  paths:
+  - path: /
+    backend: default_echo_httpsvc
+- hostname: echo2.example.com
+  paths:
+  - path: /
+    backend: default_echo_1001
+- hostname: echo3.example.com
+  paths:
+  - path: /
+    backend: default_echo_8080
+- hostname: echo4.example.com
+  paths:
+  - path: /
+    backend: default_echo_9000
+`)
+
+	c.compareConfigBack(`
+- id: default_echo_1001
+  endpoints:
+  - ip: 172.17.1.101
+    port: 8080
+- id: default_echo_8080
+  endpoints:
+  - ip: 172.17.1.101
+    port: 8080
+- id: default_echo_9000
+- id: default_echo_httpsvc
+  endpoints:
+  - ip: 172.17.1.101
+    port: 8080
+- id: _default_backend
+  endpoints:
+  - ip: 172.17.0.99
+    port: 8080
+`)
+
+	c.compareLogging(`
+ERROR error adding endpoints of service 'default/echo': port not found: '9000'
+`)
+}
+
 func TestSyncSingle(t *testing.T) {
 	c := setup(t)
 	defer c.teardown()
@@ -1042,6 +1125,12 @@ func (c *testConfig) createSvc1Ann(name, port, endpoints string, ann map[string]
 
 func (c *testConfig) createSvc1(name, port, endpoints string) *api.Service {
 	sname := strings.Split(name, "/")
+	sport := strings.Split(port, ":")
+	if len(sport) < 2 {
+		sport = []string{"", port, port}
+	} else if len(sport) < 3 {
+		sport = []string{sport[0], sport[1], sport[1]}
+	}
 
 	svc := c.createObject(`
 apiVersion: v1
@@ -1051,8 +1140,9 @@ metadata:
   namespace: ` + sname[0] + `
 spec:
   ports:
-  - port: ` + port + `
-    targetPort: ` + port).(*api.Service)
+  - name: ` + sport[0] + `
+    port: ` + sport[1] + `
+    targetPort: ` + sport[2]).(*api.Service)
 
 	c.cache.SvcList = append(c.cache.SvcList, svc)
 
@@ -1065,7 +1155,8 @@ metadata:
 subsets:
 - addresses: []
   ports:
-  - port: ` + port + `
+  - name: ` + sport[0] + `
+  - port: ` + sport[2] + `
     protocol: TCP`).(*api.Endpoints)
 
 	addr := []api.EndpointAddress{}
